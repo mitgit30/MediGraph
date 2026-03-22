@@ -1,0 +1,13 @@
+[project]
+name = "medigraph"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.135.1",
+    "torch>=2.10.0",
+    "torchaudio>=2.10.0",
+    "torchvision>=0.25.0",
+    "transformers>=5.3.0",
+]
