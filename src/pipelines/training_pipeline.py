@@ -98,7 +98,18 @@ def _set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def _configure_lora_if_enabled(
+    model: VisionEncoderDecoderModel, config: TrainingConfig) -> VisionEncoderDecoderModel:
+    if not config.use_lora:
+        
+        logger.info("LoRA disabled. Running full fine-tuning.")
+        return model
 
+    lora_config = LoraConfig(task_type=TaskType.SEQ_2_SEQ_LM,r=config.lora_r,lora_alpha=config.lora_alpha,lora_dropout=config.lora_dropout,bias="none",target_modules=config.lora_target_modules,)
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+    logger.info("LoRA enabled with r=%d, alpha=%d, dropout=%.2f, targets=%s",config.lora_r,config.lora_alpha,config.lora_dropout,config.lora_target_modules,)
+    return model
 
 
 def train_one_epoch(model: VisionEncoderDecoderModel,dataloader: DataLoader,optimizer: AdamW,scheduler,device: torch.device,) -> float:

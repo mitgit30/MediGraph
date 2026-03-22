@@ -18,7 +18,11 @@ class TrainingConfig:
     warmup_ratio: float = 0.1
     num_workers: int = 0
     seed: int = 42
-
+    use_lora: bool = True
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.1
+    lora_target_modules: list[str] = field(default_factory=lambda: ["query", "value"])
 
 
 # backward compatibility alias
