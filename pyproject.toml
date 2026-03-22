@@ -6,8 +6,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.135.1",
+    "peft>=0.17.1",
+    "pillow>=11.3.0",
     "torch>=2.10.0",
     "torchaudio>=2.10.0",
+    "tqdm>=4.67.1",
     "torchvision>=0.25.0",
     "transformers>=5.3.0",
 ]

@@ -4,3 +4,6 @@ torch
 torchvision
 torchaudio
 fastapi
+tqdm
+pillow
+peft
