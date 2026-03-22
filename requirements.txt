@@ -7,3 +7,5 @@ fastapi
 tqdm
 pillow
 peft
+bitsandbytes
+accelerate

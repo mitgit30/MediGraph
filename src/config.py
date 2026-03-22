@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 
+
 @dataclass
 class TrainingConfig:
     model_name: str = "microsoft/trocr-base-handwritten"
@@ -18,11 +19,14 @@ class TrainingConfig:
     warmup_ratio: float = 0.1
     num_workers: int = 0
     seed: int = 42
-    use_lora: bool = True
-    lora_r: int = 16
-    lora_alpha: int = 32
-    lora_dropout: float = 0.1
-    lora_target_modules: list[str] = field(default_factory=lambda: ["query", "value"])
+    use_qlora: bool = True
+    qlora_r: int = 16
+    qlora_alpha: int = 32
+    qlora_dropout: float = 0.1
+    qlora_4bit_quant_type: str = "nf4"
+    qlora_use_double_quant: bool = True
+    qlora_compute_dtype: str = "float16"
+    qlora_target_modules: list[str] = field(default_factory=lambda: ["query", "value"])
 
 
 # backward compatibility alias
