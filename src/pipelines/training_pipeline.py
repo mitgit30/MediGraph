@@ -10,17 +10,13 @@ from PIL import Image
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from transformers import (
-    BitsAndBytesConfig,
-    TrOCRProcessor,
-    VisionEncoderDecoderModel,
-    get_scheduler,
-)
+from transformers import BitsAndBytesConfig, TrOCRProcessor, VisionEncoderDecoderModel, get_scheduler
+
 
 from logger.logger import get_logger
 from src.config import TrainingConfig
 
-LOGGER = get_logger()
+logger = get_logger()
 
 
 class TrOCRDataset(Dataset):
@@ -53,6 +49,8 @@ class TrOCRDataset(Dataset):
 
         samples: List[Dict[str, str]] = []
         missing_images = 0
+        
+        
         with self.labels_path.open("r", encoding="utf-8", newline="") as csv_file:
             reader = csv.DictReader(csv_file)
             required_cols = {"IMAGE", self.label_column}
@@ -73,10 +71,13 @@ class TrOCRDataset(Dataset):
                     missing_images += 1
                     continue
 
+
                 samples.append({"image_path": str(image_path), "text": text})
 
+
+
         if missing_images:
-            LOGGER.warning(
+            logger.warning(
                 "Skipped %d rows from %s due to missing image files.",
                 missing_images,
                 self.labels_path,
@@ -84,12 +85,14 @@ class TrOCRDataset(Dataset):
         return samples
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.samples) # Return the number of valid samples loaded from the CSV file
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        
         sample = self.samples[idx]
         image = Image.open(sample["image_path"]).convert("RGB")
         pixel_values = self.processor(images=image, return_tensors="pt").pixel_values[0]
+
 
         tokenized = self.processor.tokenizer(
             sample["text"],
@@ -97,13 +100,17 @@ class TrOCRDataset(Dataset):
             max_length=self.max_target_length,
             truncation=True,
             return_tensors="pt",
+            
         )
+        
+        
         labels = tokenized.input_ids[0]
         labels[labels == self.processor.tokenizer.pad_token_id] = -100
         return {"pixel_values": pixel_values, "labels": labels}
 
 
-def _collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+# Custom collate function to handle variable-length labels and stack pixel values
+def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     pixel_values = torch.stack([item["pixel_values"] for item in batch])
     labels = torch.stack([item["labels"] for item in batch])
     return {"pixel_values": pixel_values, "labels": labels}
@@ -114,7 +121,8 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-
+# refference: https://huggingface.co/blog/qlora#training-loop-implementation ,
+ # https://medium.com/@clturner23/fine-tuning-hugging-face-llms-with-qlora-31be90a49a41
 def _resolve_compute_dtype(dtype_name: str) -> torch.dtype:
     mapping = {
         "float16": torch.float16,
@@ -129,13 +137,10 @@ def _resolve_compute_dtype(dtype_name: str) -> torch.dtype:
     return mapping[dtype_name]
 
 
-def _load_model_with_qlora(
-    model_name: str,
-    config: TrainingConfig,
-    device: torch.device,
+def _load_model_with_qlora( model_name: str, config: TrainingConfig, device: torch.device,
 ) -> VisionEncoderDecoderModel:
     if not config.use_qlora:
-        LOGGER.info("QLoRA disabled. Running full fine-tuning.")
+        logger.info("QLoRA disabled. Running full fine-tuning.")
         return VisionEncoderDecoderModel.from_pretrained(model_name)
 
     if device.type != "cuda":
@@ -145,19 +150,18 @@ def _load_model_with_qlora(
         )
 
     compute_dtype = _resolve_compute_dtype(config.qlora_compute_dtype)
+    
+    # Set up quantization config for 4-bit loading with packeagege bitsandbytes
     quantization_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type=config.qlora_4bit_quant_type,
         bnb_4bit_use_double_quant=config.qlora_use_double_quant,
         bnb_4bit_compute_dtype=compute_dtype,
     )
-    model = VisionEncoderDecoderModel.from_pretrained(
-        model_name,
-        quantization_config=quantization_config,
-        device_map="auto",
-    )
+    model = VisionEncoderDecoderModel.from_pretrained( model_name,  quantization_config=quantization_config,device_map="auto")
     model = prepare_model_for_kbit_training(model)
 
+# set up the qlora configuration and wrap up with lora
     qlora_config = LoraConfig(
         task_type=TaskType.SEQ_2_SEQ_LM,
         r=config.qlora_r,
@@ -166,9 +170,14 @@ def _load_model_with_qlora(
         bias="none",
         target_modules=config.qlora_target_modules,
     )
+    
+    
     model = get_peft_model(model, qlora_config)
+    
     model.print_trainable_parameters()
-    LOGGER.info(
+    
+    # log the qlora configuration for reference
+    logger.info(
         "QLoRA enabled with r=%d alpha=%d dropout=%.2f target_modules=%s",
         config.qlora_r,
         config.qlora_alpha,
@@ -177,13 +186,8 @@ def _load_model_with_qlora(
     )
     return model
 
-
-def _train_one_epoch(
-    model: VisionEncoderDecoderModel,
-    dataloader: DataLoader,
-    optimizer: AdamW,
-    scheduler,
-    device: torch.device,
+# simple training loop for one epoch, returns the average loss over the epoch
+def train_one_epoch(model: VisionEncoderDecoderModel,dataloader: DataLoader,optimizer: AdamW,scheduler,device: torch.device,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -205,7 +209,7 @@ def _train_one_epoch(
     return total_loss / max(len(dataloader), 1)
 
 
-@torch.no_grad()
+@torch.no_grad() # Disable gradient calculations for validation
 def _validate(
     model: VisionEncoderDecoderModel,
     dataloader: DataLoader,
@@ -226,7 +230,7 @@ def _validate(
 def run_training_pipeline(config: TrainingConfig) -> None:
     _set_seed(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    LOGGER.info("Using device: %s", device)
+    logger.info("Using device: %s", device)
 
     processor = TrOCRProcessor.from_pretrained(config.model_name)
     model = _load_model_with_qlora(config.model_name, config, device)
@@ -235,13 +239,15 @@ def run_training_pipeline(config: TrainingConfig) -> None:
     model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.eos_token_id = processor.tokenizer.sep_token_id
 
+
     train_dataset = TrOCRDataset(
         image_dir=config.train_image_dir,
         labels_path=config.train_labels_path,
         processor=processor,
         label_column=config.label_column,
-        max_target_length=config.max_target_length,
-    )
+        max_target_length=config.max_target_length)
+    
+    
     val_dataset = TrOCRDataset(
         image_dir=config.val_image_dir,
         labels_path=config.val_labels_path,
@@ -255,14 +261,14 @@ def run_training_pipeline(config: TrainingConfig) -> None:
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.num_workers,
-        collate_fn=_collate_fn,
+        collate_fn=collate_fn,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,
-        collate_fn=_collate_fn,
+        collate_fn=collate_fn,
     )
 
     total_train_steps = len(train_loader) * config.num_epochs
@@ -270,17 +276,15 @@ def run_training_pipeline(config: TrainingConfig) -> None:
         raise ValueError("Training steps resolved to zero. Check data and batch size.")
 
     warmup_steps = math.floor(total_train_steps * config.warmup_ratio)
-    optimizer = AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
+    optimizer = AdamW(model.parameters(),lr=config.learning_rate,weight_decay=config.weight_decay)
+    
+    
     scheduler = get_scheduler(
         "linear",
         optimizer=optimizer,
         num_warmup_steps=warmup_steps,
-        num_training_steps=total_train_steps,
-    )
+        num_training_steps=total_train_steps,)
+
 
     output_dir = Path(config.output_dir)
     best_dir = output_dir / "best_model"
@@ -291,9 +295,10 @@ def run_training_pipeline(config: TrainingConfig) -> None:
 
     best_val_loss = float("inf")
     for epoch in range(1, config.num_epochs + 1):
-        train_loss = _train_one_epoch(model, train_loader, optimizer, scheduler, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, device)
         val_loss = _validate(model, val_loader, device)
-        LOGGER.info(
+        
+        logger.info(
             "Epoch %d/%d | train_loss=%.4f | val_loss=%.4f",
             epoch,
             config.num_epochs,
@@ -306,13 +311,13 @@ def run_training_pipeline(config: TrainingConfig) -> None:
             best_dir.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(best_dir)
             processor.save_pretrained(best_dir)
-            LOGGER.info("Saved new best checkpoint to %s", best_dir)
+            logger.info("Saved new best checkpoint to %s", best_dir)
 
     final_dir = output_dir / "final_model"
     final_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(final_dir)
     processor.save_pretrained(final_dir)
-    LOGGER.info("Training complete. Final checkpoint saved to %s", final_dir)
+    logger.info("Training complete. Final checkpoint saved to %s", final_dir)
 
 
 if __name__ == "__main__":

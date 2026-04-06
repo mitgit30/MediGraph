@@ -3,7 +3,7 @@ import logging
 import os
 import datetime
 
-logger = logging.getLogger("StockAgentPipeline")
+logger = logging.getLogger("TrainingPipeline")
 logger.setLevel(logging.DEBUG)
 
 ## creating the file handler for handling the logs
