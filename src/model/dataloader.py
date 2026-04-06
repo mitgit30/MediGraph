@@ -1,5 +1,22 @@
 from torch.utils.data import DataLoader
 
+import os
+import kagglehub
+
+def download_dataset():
+
+    path = kagglehub.dataset_download(
+        "mamun1113/doctors-handwritten-prescription-bd-dataset"
+    )
+
+    BASE_ROOT = path
+    BASE_PATH = os.path.join(BASE_ROOT, os.listdir(BASE_ROOT)[0])
+
+    print(f"Base path : {BASE_PATH}")
+    print(f"Contents  : {os.listdir(BASE_PATH)}")
+
+    return BASE_PATH
+
 def collate_fn(batch, processor):
 
     images = [ex["image"] for ex in batch]
