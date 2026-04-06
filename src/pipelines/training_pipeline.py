@@ -1,324 +1,251 @@
-import csv
-import math
-import random
-from pathlib import Path
-from typing import Dict, List
-
+import os
+import numpy as np
 import torch
-from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+import pandas as pd
 from PIL import Image
-from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset
+from datasets import Dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import BitsAndBytesConfig, TrOCRProcessor, VisionEncoderDecoderModel, get_scheduler
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import kagglehub
+import shutil
 
+from model.config import device, BATCH_SIZE, SAVE_DIR_BEST, SAVE_DIR_FINAL
+from model.definition import model, processor
+from model.training import train
+from model.evaluation import cer_metric, wer_metric
 
-from logger.logger import get_logger
-from src.config import TrainingConfig
+torch.manual_seed(42)
+np.random.seed(42)
 
-logger = get_logger()
+print(f"PyTorch : {torch.__version__}")
+print(f"CUDA    : {torch.cuda.is_available()}")
 
+path = kagglehub.dataset_download("mamun1113/doctors-handwritten-prescription-bd-dataset")
+BASE_ROOT = path
+BASE_PATH = os.path.join(BASE_ROOT, os.listdir(BASE_ROOT)[0])
 
-class TrOCRDataset(Dataset):
-    def __init__(
-        self,
-        image_dir: str,
-        labels_path: str,
-        processor: TrOCRProcessor,
-        label_column: str,
-        max_target_length: int,
-    ) -> None:
-        self.image_dir = Path(image_dir)
-        self.labels_path = Path(labels_path)
-        self.processor = processor
-        self.label_column = label_column
-        self.max_target_length = max_target_length
-        self.samples = self._load_samples()
+print(f"Base path : {BASE_PATH}")
+print(f"Contents  : {os.listdir(BASE_PATH)}")
 
-        if not self.samples:
-            raise ValueError(
-                f"No valid samples found for image_dir='{self.image_dir}' "
-                f"and labels='{self.labels_path}'."
-            )
+def load_split(split_name):
+    split_path = os.path.join(BASE_PATH, split_name)
 
-    def _load_samples(self) -> List[Dict[str, str]]:
-        if not self.image_dir.exists():
-            raise FileNotFoundError(f"Image directory not found: {self.image_dir}")
-        if not self.labels_path.exists():
-            raise FileNotFoundError(f"Labels file not found: {self.labels_path}")
+    if not os.path.exists(split_path):
+        raise FileNotFoundError(f"Split folder not found: {split_path}")
 
-        samples: List[Dict[str, str]] = []
-        missing_images = 0
-        
-        
-        with self.labels_path.open("r", encoding="utf-8", newline="") as csv_file:
-            reader = csv.DictReader(csv_file)
-            required_cols = {"IMAGE", self.label_column}
-            missing_cols = required_cols - set(reader.fieldnames or [])
-            if missing_cols:
-                raise ValueError(
-                    f"Missing columns {missing_cols} in labels file: {self.labels_path}"
-                )
+    print(f"\nLoading split: {split_name}")
 
-            for row in reader:
-                image_name = str(row["IMAGE"]).strip()
-                text = str(row[self.label_column]).strip()
-                image_path = self.image_dir / image_name
+    label_files = [f for f in os.listdir(split_path) if f.lower().endswith(('.csv', '.xlsx'))]
 
-                if not image_name or not text:
-                    continue
-                if not image_path.exists():
-                    missing_images += 1
-                    continue
+    if not label_files:
+        raise FileNotFoundError(f"No label file in {split_path}")
 
+    label_path = os.path.join(split_path, label_files[0])
+    df = pd.read_excel(label_path) if label_path.endswith(".xlsx") else pd.read_csv(label_path)
 
-                samples.append({"image_path": str(image_path), "text": text})
+    print(f"Loaded {len(df)} rows | Columns: {df.columns.tolist()}")
 
+    image_col, text_col = None, None
+    for col in df.columns:
+        cl = str(col).lower()
+        if cl in ['image_name', 'filename', 'img', 'image']: image_col = col
+        if cl in ['word', 'label', 'text', 'transcription']: text_col = col
 
+    image_col = image_col or df.columns[0]
+    text_col  = text_col  or df.columns[1]
 
-        if missing_images:
-            logger.warning(
-                "Skipped %d rows from %s due to missing image files.",
-                missing_images,
-                self.labels_path,
-            )
-        return samples
+    df = df.rename(columns={image_col: "file_name", text_col: "text"})
 
-    def __len__(self) -> int:
-        return len(self.samples) # Return the number of valid samples loaded from the CSV file
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        
-        sample = self.samples[idx]
-        image = Image.open(sample["image_path"]).convert("RGB")
-        pixel_values = self.processor(images=image, return_tensors="pt").pixel_values[0]
-
-
-        tokenized = self.processor.tokenizer(
-            sample["text"],
-            padding="max_length",
-            max_length=self.max_target_length,
-            truncation=True,
-            return_tensors="pt",
-            
-        )
-        
-        
-        labels = tokenized.input_ids[0]
-        labels[labels == self.processor.tokenizer.pad_token_id] = -100
-        return {"pixel_values": pixel_values, "labels": labels}
-
-
-# Custom collate function to handle variable-length labels and stack pixel values
-def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-    pixel_values = torch.stack([item["pixel_values"] for item in batch])
-    labels = torch.stack([item["labels"] for item in batch])
-    return {"pixel_values": pixel_values, "labels": labels}
-
-
-def _set_seed(seed: int) -> None:
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-# refference: https://huggingface.co/blog/qlora#training-loop-implementation ,
- # https://medium.com/@clturner23/fine-tuning-hugging-face-llms-with-qlora-31be90a49a41
-def _resolve_compute_dtype(dtype_name: str) -> torch.dtype:
-    mapping = {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
+    subfolder_map = {
+        "Training": "training_words",
+        "Validation": "validation_words",
+        "Testing": "testing_words"
     }
-    if dtype_name not in mapping:
-        raise ValueError(
-            f"Unsupported qlora_compute_dtype '{dtype_name}'. "
-            f"Use one of: {sorted(mapping)}."
-        )
-    return mapping[dtype_name]
 
+    image_folder = os.path.join(split_path, subfolder_map.get(split_name, "words"))
 
-def _load_model_with_qlora( model_name: str, config: TrainingConfig, device: torch.device,
-) -> VisionEncoderDecoderModel:
-    if not config.use_qlora:
-        logger.info("QLoRA disabled. Running full fine-tuning.")
-        return VisionEncoderDecoderModel.from_pretrained(model_name)
+    if not os.path.exists(image_folder):
+        raise FileNotFoundError(f"Image folder not found: {image_folder}")
 
-    if device.type != "cuda":
-        raise RuntimeError(
-            "QLoRA requires CUDA (4-bit bitsandbytes). "
-            "Set use_qlora=False for CPU training."
-        )
-
-    compute_dtype = _resolve_compute_dtype(config.qlora_compute_dtype)
-    
-    # Set up quantization config for 4-bit loading with packeagege bitsandbytes
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type=config.qlora_4bit_quant_type,
-        bnb_4bit_use_double_quant=config.qlora_use_double_quant,
-        bnb_4bit_compute_dtype=compute_dtype,
+    df["file_name"] = df["file_name"].apply(
+        lambda x: os.path.join(image_folder, x) if isinstance(x, str) else None
     )
-    model = VisionEncoderDecoderModel.from_pretrained( model_name,  quantization_config=quantization_config,device_map="auto")
-    model = prepare_model_for_kbit_training(model)
 
-# set up the qlora configuration and wrap up with lora
-    qlora_config = LoraConfig(
-        task_type=TaskType.SEQ_2_SEQ_LM,
-        r=config.qlora_r,
-        lora_alpha=config.qlora_alpha,
-        lora_dropout=config.qlora_dropout,
-        bias="none",
-        target_modules=config.qlora_target_modules,
-    )
-    
-    
-    model = get_peft_model(model, qlora_config)
-    
-    model.print_trainable_parameters()
-    
-    # log the qlora configuration for reference
-    logger.info(
-        "QLoRA enabled with r=%d alpha=%d dropout=%.2f target_modules=%s",
-        config.qlora_r,
-        config.qlora_alpha,
-        config.qlora_dropout,
-        config.qlora_target_modules,
-    )
-    return model
+    df["exists"] = df["file_name"].apply(lambda x: os.path.exists(x) if x else False)
 
-# simple training loop for one epoch, returns the average loss over the epoch
-def train_one_epoch(model: VisionEncoderDecoderModel,dataloader: DataLoader,optimizer: AdamW,scheduler,device: torch.device,
-) -> float:
+    dropped = (~df["exists"]).sum()
+    if dropped:
+        print(f"Dropping {dropped} missing images")
+
+    df = df[df["exists"]].drop(columns=["exists"]).reset_index(drop=True)
+    df["text"] = df["text"].astype(str).str.strip()
+
+    print(f"Usable samples: {len(df)}")
+
+    return Dataset.from_pandas(df)
+
+
+train_ds = load_split("Training")
+val_ds   = load_split("Validation")
+test_ds  = load_split("Testing")
+
+print(f"\nSummary → Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
+
+def load_image(example):
+    try:
+        example["image"] = Image.open(example["file_name"]).convert("RGB")
+    except Exception:
+        example["image"] = None
+    return example
+
+train_ds = train_ds.map(load_image, num_proc=1)
+val_ds   = val_ds.map(load_image,   num_proc=1)
+test_ds  = test_ds.map(load_image,  num_proc=1)
+
+train_ds = train_ds.filter(lambda x: x["image"] is not None)
+val_ds   = val_ds.filter(lambda x: x["image"] is not None)
+test_ds  = test_ds.filter(lambda x: x["image"] is not None)
+
+print(f"After filtering --> Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
+
+def collate_fn(batch):
+    images = [ex["image"] for ex in batch]
+    texts  = [ex["text"]  for ex in batch]
+
+    encoding = processor(
+        images=images,
+        text=texts,
+        padding="max_length",
+        max_length=32,
+        truncation=True,
+        return_tensors="pt"
+    )
+
+    labels = encoding["labels"].clone()
+    labels[labels == processor.tokenizer.pad_token_id] = -100
+
+    return {
+        "pixel_values": encoding["pixel_values"],
+        "labels": labels
+    }
+
+train_loader = DataLoader(
+    train_ds,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    collate_fn=collate_fn,
+    num_workers=2,
+    pin_memory=True
+)
+
+val_loader = DataLoader(
+    val_ds,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+    collate_fn=collate_fn,
+    num_workers=2,
+    pin_memory=True
+)
+
+print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
+
+optimizer, scheduler, scaler, history, best_cer = train(
+    model, processor, train_loader, val_loader, device
+)
+
+print("Starting full fine-tune (encoder + decoder)...\n")
+
+for epoch in range(10):
+
     model.train()
-    total_loss = 0.0
+    train_loss_accum = 0.0
+    optimizer.zero_grad()
 
-    for batch in tqdm(dataloader, desc="Training", leave=False):
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/10 [Train]")
+
+    for step, batch in enumerate(pbar):
+
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"].to(device)
 
-        outputs = model(pixel_values=pixel_values, labels=labels)
-        loss = outputs.loss
+        with torch.amp.autocast("cuda"):
+            outputs = model(pixel_values=pixel_values, labels=labels)
+            loss = outputs.loss / 4
 
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward()
+        train_loss_accum += loss.item() * 4
 
-        total_loss += loss.item()
+        if (step + 1) % 4 == 0:
 
-    return total_loss / max(len(dataloader), 1)
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            scheduler.step()
 
+        pbar.set_postfix({"train_loss": f"{train_loss_accum / (step + 1):.4f}"})
 
-@torch.no_grad() # Disable gradient calculations for validation
-def _validate(
-    model: VisionEncoderDecoderModel,
-    dataloader: DataLoader,
-    device: torch.device,
-) -> float:
+    avg_train_loss = train_loss_accum / len(train_loader)
+
     model.eval()
-    total_loss = 0.0
+    val_loss_accum = 0.0
+    all_preds, all_labels_str = [], []
 
-    for batch in tqdm(dataloader, desc="Validation", leave=False):
-        pixel_values = batch["pixel_values"].to(device)
-        labels = batch["labels"].to(device)
-        outputs = model(pixel_values=pixel_values, labels=labels)
-        total_loss += outputs.loss.item()
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/10 [Val]"):
 
-    return total_loss / max(len(dataloader), 1)
+            pixel_values = batch["pixel_values"].to(device)
+            labels       = batch["labels"].to(device)
 
+            with torch.amp.autocast("cuda"):
+                outputs = model(pixel_values=pixel_values, labels=labels)
 
-def run_training_pipeline(config: TrainingConfig) -> None:
-    _set_seed(config.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("Using device: %s", device)
+            val_loss_accum += outputs.loss.item()
 
-    processor = TrOCRProcessor.from_pretrained(config.model_name)
-    model = _load_model_with_qlora(config.model_name, config, device)
+            generated_ids = model.generate(pixel_values)
+            pred_str = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
-    model.config.decoder_start_token_id = processor.tokenizer.cls_token_id
-    model.config.pad_token_id = processor.tokenizer.pad_token_id
-    model.config.eos_token_id = processor.tokenizer.sep_token_id
+            label_ids = batch["labels"].clone()
+            label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+            label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
 
+            all_preds.extend(pred_str)
+            all_labels_str.extend(label_str)
 
-    train_dataset = TrOCRDataset(
-        image_dir=config.train_image_dir,
-        labels_path=config.train_labels_path,
-        processor=processor,
-        label_column=config.label_column,
-        max_target_length=config.max_target_length)
-    
-    
-    val_dataset = TrOCRDataset(
-        image_dir=config.val_image_dir,
-        labels_path=config.val_labels_path,
-        processor=processor,
-        label_column=config.label_column,
-        max_target_length=config.max_target_length,
-    )
+    avg_val_loss = val_loss_accum / len(val_loader)
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        collate_fn=collate_fn,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        collate_fn=collate_fn,
-    )
+    cer = cer_metric.compute(predictions=all_preds, references=all_labels_str)
+    wer = wer_metric.compute(predictions=all_preds, references=all_labels_str)
 
-    total_train_steps = len(train_loader) * config.num_epochs
-    if total_train_steps == 0:
-        raise ValueError("Training steps resolved to zero. Check data and batch size.")
+    enc_lr = optimizer.param_groups[0]["lr"]
+    dec_lr = optimizer.param_groups[1]["lr"]
 
-    warmup_steps = math.floor(total_train_steps * config.warmup_ratio)
-    optimizer = AdamW(model.parameters(),lr=config.learning_rate,weight_decay=config.weight_decay)
-    
-    
-    scheduler = get_scheduler(
-        "linear",
-        optimizer=optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_train_steps,)
+    history["epoch"].append(epoch + 1)
+    history["train_loss"].append(avg_train_loss)
+    history["val_loss"].append(avg_val_loss)
+    history["cer"].append(cer)
+    history["wer"].append(wer)
+    history["enc_lr"].append(enc_lr)
+    history["dec_lr"].append(dec_lr)
 
+    print(f"\nEpoch {epoch+1:>2} | "
+          f"Train Loss: {avg_train_loss:.4f} | "
+          f"Val Loss: {avg_val_loss:.4f} | "
+          f"CER: {cer:.4f} | "
+          f"WER: {wer:.4f} | "
+          f"Enc LR: {enc_lr:.2e} | "
+          f"Dec LR: {dec_lr:.2e}")
 
-    output_dir = Path(config.output_dir)
-    best_dir = output_dir / "best_model"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if cer < best_cer:
+        best_cer = cer
+        model.save_pretrained(SAVE_DIR_BEST)
+        processor.save_pretrained(SAVE_DIR_BEST)
+        print(f"  Best model saved (CER: {cer:.4f})")
 
-    if not config.use_qlora:
-        model.to(device)
+model.save_pretrained(SAVE_DIR_FINAL)
+processor.save_pretrained(SAVE_DIR_FINAL)
 
-    best_val_loss = float("inf")
-    for epoch in range(1, config.num_epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, device)
-        val_loss = _validate(model, val_loader, device)
-        
-        logger.info(
-            "Epoch %d/%d | train_loss=%.4f | val_loss=%.4f",
-            epoch,
-            config.num_epochs,
-            train_loss,
-            val_loss,
-        )
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_dir.mkdir(parents=True, exist_ok=True)
-            model.save_pretrained(best_dir)
-            processor.save_pretrained(best_dir)
-            logger.info("Saved new best checkpoint to %s", best_dir)
-
-    final_dir = output_dir / "final_model"
-    final_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(final_dir)
-    processor.save_pretrained(final_dir)
-    logger.info("Training complete. Final checkpoint saved to %s", final_dir)
-
-
-if __name__ == "__main__":
-    run_training_pipeline(TrainingConfig())
+print(f"\nTraining complete. Best CER: {best_cer:.4f}")
