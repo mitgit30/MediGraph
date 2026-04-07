@@ -15,4 +15,10 @@ dependencies = [
     "tqdm>=4.67.1",
     "torchvision>=0.25.0",
     "transformers>=5.3.0",
+    "pandas>=3.0.2",
+    "evaluate>=0.4.6",
+    "jiwer>=4.0.0",
+    "datasets>=4.8.4",
+    "kagglehub>=1.0.0",
+    "matplotlib>=3.10.8",
 ]

@@ -9,3 +9,10 @@ pillow
 peft
 bitsandbytes
 accelerate
+pandas 
+accelerate 
+evaluate 
+jiwer 
+datasets 
+kagglehub 
+matplotlib
