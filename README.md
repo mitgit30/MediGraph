@@ -1,13 +1,15 @@
 ## MediGraph
 
-MediGraph is a handwritten medical text recognition project built around `microsoft/trocr-base-handwritten`.
-The current focus is fine-tuning on doctor handwriting data and running local inference on prescription word images.
+MediGraph is a prescription-understanding project with two core stages:
+- OCR stage: fine-tuned TrOCR for doctor handwriting extraction.
+- GraphRAG stage: DRKG + Neo4j retrieval for evidence-grounded medical reporting.
 
 ## Project Goal
 
-- Fine-tune a TrOCR-based model on doctor handwritten medicine names.
-- Track quality with loss and text metrics like CER/WER.
-- Save best and final checkpoints for inference.
+- Extract text from handwritten prescriptions.
+- Verify/normalize extracted text before downstream reasoning.
+- Build a production-grade GraphRAG pipeline over DRKG.
+- Generate a final structured LLM report with graph-backed evidence.
 
 ## Current Repository Layout
 
@@ -27,16 +29,24 @@ MediGraph/
 │   │   ├── definition.py
 │   │   ├── preprocess.py
 │   │   └── training.py
+│   ├── graph/
+│   │   ├── schema.cypher
+│   │   └── ingest/
+│   │       └── tsv_to_csv.py
 │   ├── pipelines/
 │   │   └── training_pipeline.py
 │   └── visualization/
 │       └── plots.py
+├── drkg/
+│   ├── drkg.tsv
+│   ├── entity2src.tsv
+│   └── relation_glossary.tsv
 ├── requirements.txt
 ├── pyproject.toml
 └── README.md
 ```
 
-## Dataset Format
+## OCR Data Format
 
 Expected split folders:
 
@@ -45,6 +55,13 @@ Expected split folders:
 - `data/Testing/testing_words` + label file
 
 Label files are expected to contain image file name and text label columns (CSV/XLSX supported in preprocessing flow).
+
+## DRKG Assets Used
+
+Required files for graph build:
+- `drkg/drkg.tsv` (main edge list)
+- `drkg/entity2src.tsv` (entity provenance)
+- `drkg/relation_glossary.tsv` (relation metadata)
 
 ## Environment Setup
 
@@ -67,7 +84,7 @@ Or with `uv`:
 uv sync
 ```
 
-## Training
+## OCR Training
 
 Current training entrypoint:
 
@@ -75,7 +92,7 @@ Current training entrypoint:
 python src/pipelines/training_pipeline.py
 ```
 
-## Inference
+## OCR Inference
 
 `src/inference.py` exposes:
 
@@ -91,6 +108,51 @@ model, processor, device = load_model("path_to_saved_model")
 predict("path_to_image.png", model, processor, device)
 ```
 
+## DRKG TSV -> CSV Pipeline
+
+Converter script:
+- `src/graph/ingest/tsv_to_csv.py`
+
+Run:
+
+```powershell
+python src/graph/ingest/tsv_to_csv.py
+```
+
+Default outputs:
+- `artifacts/graph/import_csv/nodes.csv`
+- `artifacts/graph/import_csv/edges.csv`
+- `artifacts/graph/import_csv/relations.csv`
+- `artifacts/graph/import_csv/entity_sources.csv`
+
+Current conversion result:
+- Edge rows read: `5,874,261`
+- Edge rows written: `5,874,261`
+- Bad edge rows: `0`
+- Node rows written: `97,238`
+- Relation rows written: `107`
+- Entity source rows: `97,238`
+
+## Neo4j Plan (Docker-first)
+
+- Neo4j will be run in Docker for dev/prod consistency.
+- Graph data should be mounted to a persistent volume (`/data`), so `docker compose stop/down` does not lose DB contents.
+- Data loss happens only if volume is removed (for example `docker compose down -v`).
+
+## GraphRAG Implementation Direction
+
+Planned architecture:
+1. Prescription upload (Streamlit).
+2. TrOCR extraction.
+3. Text verification/normalization.
+4. Entity linking to graph.
+5. Neo4j retrieval (GraphRAG).
+6. Final LLM report with evidence.
+
+Current stage:
+- DRKG preprocessing completed.
+- Neo4j schema/load/retrieval integration is the next implementation step.
+
 ## Dependencies Used in Project
 
 - `transformers`, `torch`, `torchvision`, `torchaudio`
@@ -103,4 +165,4 @@ predict("path_to_image.png", model, processor, device)
 
 - Logging is configured in `logger/logger.py`.
 - Visualization utilities are in `src/visualization/plots.py`.
-- The codebase is in active development and training/inference modules are being iterated.
+- The codebase is in active development and the GraphRAG stack is being built incrementally.

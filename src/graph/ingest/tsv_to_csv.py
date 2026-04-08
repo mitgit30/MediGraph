@@ -202,12 +202,12 @@ def main() -> None:
     )
 
     print("DRKG TSV to CSV conversion completed.")
-    print(f"Edge rows read      : {stats.edge_rows_read}")
-    print(f"Edge rows written   : {stats.edge_rows_written}")
-    print(f"Bad edge rows       : {stats.bad_edge_rows}")
-    print(f"Node rows written   : {stats.node_rows_written}")
+    print(f"Edge rows read : {stats.edge_rows_read}")
+    print(f"Edge rows written: {stats.edge_rows_written}")
+    print(f"Bad edge rows : {stats.bad_edge_rows}")
+    print(f"Node rows written : {stats.node_rows_written}")
     print(f"Relation rows written: {stats.relation_rows_written}")
-    print(f"Entity source rows  : {stats.source_rows_written}")
+    print(f"Entity source rows: {stats.source_rows_written}")
 
 
 if __name__ == "__main__":
