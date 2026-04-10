@@ -6,13 +6,16 @@ services:
     ports:
       - "7474:7474"
       - "7687:7687"
+    env_file:
+      - .env
     environment:
-      NEO4J_AUTH: "${NEO4J_AUTH}"
+      
+      NEO4J_AUTH: "neo4j/password123"
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
       NEO4J_dbms_memory_heap_initial__size: "1G"
       NEO4J_dbms_memory_heap_max__size: "2G"
-      NEO4J_server_memory_pagecache_size: "1G"
+      NEO4J_server_memory_pagecache_size: "512M"
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
@@ -30,3 +33,4 @@ volumes:
   neo4j_logs:
   neo4j_import:
   neo4j_plugins:
+  
