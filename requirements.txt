@@ -16,3 +16,8 @@ jiwer
 datasets 
 kagglehub 
 matplotlib
+neo4j
+langchain
+langchain-core
+langchain-neo4j
+langchain-ollama
