@@ -16,8 +16,9 @@ class GraphConfig:
     artifacts_dir: Path = Path(
         os.getenv("GRAPH_ARTIFACTS_DIR", "artifacts/graph/import_csv")
     )
-    local_llm_provider: str = os.getenv("LOCAL_LLM_PROVIDER", "ollama")
-    local_llm_model: str = os.getenv("LOCAL_LLM_MODEL", "llama3.1:8b")
+    local_llm_provider: str = os.getenv("OLLAMA_LLM_PROVIDER", "ollama")
+    local_llm_model: str = os.getenv("OLLAMA_LLM_MODEL", "gpt-oss:120b-cloud")
     local_llm_base_url: str = os.getenv(
-        "LOCAL_LLM_BASE_URL", "http://localhost:11434"
+        "OLLAMA_LLM_BASE_URL", "https://ollama.com/"
     )
+    ollama_api_key: str = os.getenv("OLLAMA_API_KEY", "")
