@@ -16,6 +16,24 @@ MediGraph is a prescription understanding system with:
   - basic pipeline orchestration
 - Medicine normalization bridge is added (brand -> generic expansion from dataset labels).
 
+## Technical Architecture (Current)
+
+1. OCR stage:
+- `src/pipelines/training_pipeline.py` for model fine-tuning.
+- `src/inference.py` for loading and predicting OCR text.
+
+2. Graph build stage:
+- `src/graph/ingest/tsv_to_csv.py` converts DRKG TSV files to import CSVs.
+- `src/graph/ingest/load_neo4j.py` applies schema and ingests CSVs in batches.
+- `src/graph/schema.cypher` defines Neo4j constraints/indexes.
+
+3. Retrieval stage:
+- `src/graph/retrieval/entity_linker.py` maps query terms to graph entities.
+- `src/graph/retrieval/medicine_mapper.py` expands brand -> generic from label CSVs.
+- `src/graph/retrieval/graph_retriever.py` retrieves local graph paths (1-2 hops).
+- `src/graph/retrieval/context_builder.py` creates LLM-ready evidence context.
+- `src/graph/retrieval/pipeline.py` orchestrates end-to-end retrieval flow.
+
 ## Data Sources Used
 
 - OCR dataset: doctor handwritten prescription words (`data/Training`, `data/Validation`, `data/Testing`).
@@ -58,6 +76,15 @@ pytest -s tests/test_medicine_mapper.py
 pytest -s tests/test_graph_retrieval.py
 ```
 
+## Runtime Configuration
+
+Key variables in `.env`:
+- `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`
+- `GRAPH_INGEST_BATCH_SIZE`
+- `GRAPH_ARTIFACTS_DIR`
+- `OLLAMA_LLM_PROVIDER`, `OLLAMA_LLM_MODEL`, `OLLAMA_LLM_BASE_URL`, `OLLAMA_API_KEY`
+- `GRAPH_MEDICINE_MAP_TRAIN`, `GRAPH_MEDICINE_MAP_VAL`, `GRAPH_MEDICINE_MAP_TEST`
+
 ## Important Outputs
 
 Generated graph CSV artifacts:
@@ -70,6 +97,29 @@ Generated graph CSV artifacts:
 
 Use `.env` for runtime secrets/config.
 Use `.env.example` as template.
+
+## Neo4j Verification (Post-Ingestion)
+
+Run in Neo4j Browser:
+
+```cypher
+MATCH (n:Entity) RETURN count(n) AS total_nodes;
+MATCH ()-[r:RELATED_TO]->() RETURN count(r) AS total_edges;
+MATCH (a:Entity)-[r:RELATED_TO]->(b:Entity)
+RETURN a.id, r.relation_name, b.id
+LIMIT 25;
+```
+
+Expected behavior:
+- Node/edge counts are non-zero and aligned with ingestion logs.
+- `relation_name` appears on relationships.
+- `sources` appears on nodes where entity provenance exists.
+
+## Retrieval Notes
+
+- Retrieval is local-search oriented for current phase (anchor entities -> neighborhood paths).
+- Matching uses `exact -> startswith -> contains` scoring.
+- For real prescriptions, generic-name normalization is required before graph lookup.
 
 ## Next Steps
 
