@@ -22,6 +22,10 @@ class EntityLinker:
             if len(term) < 3:
                 continue
             terms.append(term)
+            for token in term.split(" "):
+                token = token.strip()
+                if len(token) >= 3:
+                    terms.append(token)
 
         if not terms:
             words = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-\+]{2,}", text or "")
