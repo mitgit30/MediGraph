@@ -22,3 +22,8 @@ class GraphConfig:
         "OLLAMA_LLM_BASE_URL", "https://ollama.com/"
     )
     ollama_api_key: str = os.getenv("OLLAMA_API_KEY", "")
+    medicine_map_files: tuple[Path, ...] = (
+        Path(os.getenv("GRAPH_MEDICINE_MAP_TRAIN", "data/Training/training_labels.csv")),
+        Path(os.getenv("GRAPH_MEDICINE_MAP_VAL", "data/Validation/validation_labels.csv")),
+        Path(os.getenv("GRAPH_MEDICINE_MAP_TEST", "data/Testing/testing_labels.csv")),
+    )

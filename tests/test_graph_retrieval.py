@@ -12,8 +12,8 @@ def test_graph():
     client = Neo4jClient(config)
     pipeline = GraphRetrievalPipeline(client)
 
-    query_text = "Gene::2157"
-    output = pipeline.run(query_text=query_text,max_terms=10,top_k_per_term=3,max_hops=1,max_paths_per_entity=5)
+    query_text = "Take Gene::2157 OD after food" # try to match "Take Paracetamol OD after food"
+    output = pipeline.run(query_text=query_text,max_terms=20,top_k_per_term=5,max_hops=1,max_paths_per_entity=5)
     result = output["result"]
     context = output["context"]
 
