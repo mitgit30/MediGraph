@@ -15,6 +15,17 @@ MediGraph is a prescription understanding system with:
   - context building
   - basic pipeline orchestration
 - Medicine normalization bridge is added (brand -> generic expansion from dataset labels).
+### Overall Project State
+
+The repository now provides a **complete end-to-end prototype** that can:
+
+1. **Ingest** the DRKG biomedical knowledge graph into Neo4j (schema applied, CSV import automated).
+2. **Link** free-text prescription statements to graph entities using exact, prefix and fuzzy matching, with a medicine-specific alias mapper.
+3. **Retrieve** a localized sub-graph (1-2 hops) around the matched entities, assemble evidence paths, and surface them as LLM-ready context.
+4. **Generate** a concise natural-language summary via the configured LLM adapter (e.g., Ollama, OpenAI).
+5. **Expose** a simple CLI entry point (`main.py`) for quick sanity checks and a clear path to wrap the flow in a FastAPI/Streamlit UI.
+
+All components are wired together through thin adapters (`Neo4jClient`, `LocalLLMAdapter`) and respect the layered architecture described in the Technical Architecture section. Tests cover the Neo4j client, medicine mapper, and graph retrieval pipeline, confirming that each stage returns non-empty results when proper data is present.
 
 ## Technical Architecture (Current)
 
@@ -127,3 +138,4 @@ Expected behavior:
 - Add retrieval ranking and confidence calibration.
 - Connect retrieval context to final LLM report generation.
 - Integrate full flow in Streamlit UI.
+
