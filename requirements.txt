@@ -23,3 +23,5 @@ langchain-neo4j
 langchain-ollama
 ollama
 python-dotenv
+biopython
+mygene

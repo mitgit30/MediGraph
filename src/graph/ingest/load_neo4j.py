@@ -54,7 +54,8 @@ def load_nodes(client: Neo4jClient, nodes_path: Path, batch_size: int) -> int:
     UNWIND $rows AS row
     MERGE (n:Entity {id: row.id})
     SET n.name = row.name,
-        n.type = row.type
+        n.type = row.type,
+        n.clean_id = row.clean_id
     WITH n, row
     CALL apoc.create.addLabels(n, [row.type_label]) YIELD node
     RETURN count(node) AS updated
@@ -68,6 +69,7 @@ def load_nodes(client: Neo4jClient, nodes_path: Path, batch_size: int) -> int:
                 payload.append(
                     {
                         "id": row.get("id", "").strip(),
+                        "clean_id": row.get("clean_id", "").strip(),
                         "name": row.get("name", "").strip(),
                         "type": row.get("type", "").strip(),
                         "type_label": _safe_label(row.get("type", "")),
@@ -94,7 +96,8 @@ def load_edges(client: Neo4jClient, edges_path: Path, batch_size: int) -> int:
     MATCH (t:Entity {id: row.tail_id})
     MERGE (h)-[r:RELATED_TO {relation_name: row.relation_name}]->(t)
     SET r.head_type = row.head_type,
-        r.tail_type = row.tail_type
+        r.tail_type = row.tail_type,
+        r.relation_type = row.relation_type
     RETURN count(r) AS updated
     """
 
@@ -108,6 +111,7 @@ def load_edges(client: Neo4jClient, edges_path: Path, batch_size: int) -> int:
                         "head_id": row.get("head_id", "").strip(),
                         "tail_id": row.get("tail_id", "").strip(),
                         "relation_name": row.get("relation", "").strip(),
+                        "relation_type": row.get("relation_type", "").strip(),
                         "head_type": row.get("head_type", "").strip(),
                         "tail_type": row.get("tail_type", "").strip(),
                     }
@@ -131,7 +135,8 @@ def load_entity_sources(client: Neo4jClient, entity_sources_path: Path, batch_si
     query = """
     UNWIND $rows AS row
     MATCH (n:Entity {id: row.entity_id})
-    SET n.sources = row.sources
+    SET n.sources = row.sources,
+        n.source_systems = row.source_systems
     RETURN count(n) AS updated
     """
 
@@ -142,6 +147,11 @@ def load_entity_sources(client: Neo4jClient, entity_sources_path: Path, batch_si
                 {
                     "entity_id": row.get("entity_id", "").strip(),
                     "sources": row.get("sources", "").strip(),
+                    "source_systems": [
+                        value.strip()
+                        for value in row.get("source_systems", "").split("|")
+                        if value.strip()
+                    ],
                 }
                 for row in batch
             ]
