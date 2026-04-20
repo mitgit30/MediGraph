@@ -44,8 +44,13 @@ def build_entity_name(
     entity_name: str,
     entity_id: str,
     gene_symbol_map: dict[str, str] | None = None,
+    compound_name_map: dict[str, str] | None = None,
 ) -> str:
     name = (entity_name or "").strip()
+    if entity_type == "Compound":
+        compound_key = name.upper()
+        if compound_name_map and compound_key in compound_name_map:
+            return compound_name_map[compound_key]
     if entity_type == "Gene" and name.isdigit():
         if gene_symbol_map and name in gene_symbol_map:
             return gene_symbol_map[name]
@@ -53,6 +58,26 @@ def build_entity_name(
     if name:
         return name
     return entity_id
+
+
+def build_base_name(entity_type: str, entity_name: str, entity_id: str) -> str:
+    name = (entity_name or "").strip()
+    if entity_type == "Gene" and name.isdigit():
+        return f"Gene {name}"
+    if name:
+        return name
+    return entity_id
+
+
+def build_gene_symbol(entity_type: str, entity_name: str, gene_symbol_map: dict[str, str]) -> str:
+    name = (entity_name or "").strip()
+    if entity_type != "Gene":
+        return ""
+    if name.isdigit() and name in gene_symbol_map:
+        return gene_symbol_map[name]
+    if name and not name.isdigit():
+        return name
+    return ""
 
 
 def build_source_systems(source_text: str) -> str:
@@ -111,6 +136,22 @@ def read_relation_glossary(relation_glossary_path: Path) -> dict[str, dict[str, 
     return relation_info
 
 
+def read_drugbank_vocabulary(drugbank_vocab_path: Path) -> dict[str, str]:
+    compound_name_map: dict[str, str] = {}
+    if not drugbank_vocab_path.exists():
+        return compound_name_map
+
+    with drugbank_vocab_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            drugbank_id = (row.get("DrugBank ID") or "").strip().upper()
+            common_name = (row.get("Common name") or "").strip()
+            if not drugbank_id or not common_name:
+                continue
+            compound_name_map[drugbank_id] = common_name
+    return compound_name_map
+
+
 def collect_gene_numbers(drkg_tsv_path: Path) -> set[str]:
     gene_numbers: set[str] = set()
     with drkg_tsv_path.open("r", encoding="utf-8", newline="") as handle:
@@ -127,10 +168,21 @@ def collect_gene_numbers(drkg_tsv_path: Path) -> set[str]:
     return gene_numbers
 
 
+def safe_label(raw_type: str) -> str:
+    parts = [part for part in re.split(r"[^A-Za-z0-9]+", (raw_type or "").strip()) if part]
+    if not parts:
+        return "UnknownType"
+    cleaned = "".join(part[0].upper() + part[1:] for part in parts)
+    if cleaned[0].isdigit():
+        return f"T_{cleaned}"
+    return cleaned
+
+
 def convert_drkg_tsv_to_csv(
     drkg_tsv_path: Path,
     entity2src_path: Path,
     relation_glossary_path: Path,
+    drugbank_vocab_path: Path,
     output_dir: Path,
     resolve_gene_names: bool = True,
 ) -> ParseStats:
@@ -143,6 +195,7 @@ def convert_drkg_tsv_to_csv(
     stats = ParseStats()
     entity_sources = read_entity_sources(entity2src_path)
     relation_info = read_relation_glossary(relation_glossary_path)
+    compound_name_map = read_drugbank_vocabulary(drugbank_vocab_path)
     gene_symbol_map: dict[str, str] = {}
 
     if resolve_gene_names:
@@ -150,7 +203,7 @@ def convert_drkg_tsv_to_csv(
         resolver = GeneNameResolver()
         gene_symbol_map = resolver.resolve_symbols(gene_numbers)
 
-    nodes_by_id: dict[str, tuple[str, str, str]] = {}
+    nodes_by_id: dict[str, tuple[str, str, str, str, str, str]] = {}
 
     with drkg_tsv_path.open("r", encoding="utf-8", newline="") as drkg_handle, edges_csv_path.open(
         "w", encoding="utf-8", newline=""
@@ -162,8 +215,9 @@ def convert_drkg_tsv_to_csv(
                 "head_id",
                 "head_type",
                 "head_name",
-                "relation",
+                "relation_name",
                 "relation_type",
+                "relation",
                 "tail_id",
                 "tail_type",
                 "tail_name",
@@ -182,8 +236,12 @@ def convert_drkg_tsv_to_csv(
             tail_id, tail_type, tail_name = parse_entity(tail_raw)
             relation = relation_raw.strip()
             relation_type = sanitize_relation_type(relation)
-            head_name_value = build_entity_name(head_type, head_name, head_id, gene_symbol_map)
-            tail_name_value = build_entity_name(tail_type, tail_name, tail_id, gene_symbol_map)
+            head_name_value = build_entity_name(
+                head_type, head_name, head_id, gene_symbol_map, compound_name_map
+            )
+            tail_name_value = build_entity_name(
+                tail_type, tail_name, tail_id, gene_symbol_map, compound_name_map
+            )
 
             if not head_id or not relation or not tail_id:
                 stats.bad_edge_rows += 1
@@ -194,8 +252,9 @@ def convert_drkg_tsv_to_csv(
                     "head_id": head_id,
                     "head_type": head_type,
                     "head_name": head_name_value,
-                    "relation": relation,
+                    "relation_name": relation,
                     "relation_type": relation_type,
+                    "relation": relation,
                     "tail_id": tail_id,
                     "tail_type": tail_type,
                     "tail_name": tail_name_value,
@@ -206,21 +265,44 @@ def convert_drkg_tsv_to_csv(
             if head_id not in nodes_by_id:
                 nodes_by_id[head_id] = (
                     head_type,
-                    build_entity_name(head_type, head_name, head_id, gene_symbol_map),
+                    build_base_name(head_type, head_name, head_id),
                     build_clean_id(head_id),
+                    build_gene_symbol(head_type, head_name, gene_symbol_map),
+                    safe_label(head_type),
+                    build_entity_name(
+                        head_type, head_name, head_id, gene_symbol_map, compound_name_map
+                    ),
                 )
             if tail_id not in nodes_by_id:
                 nodes_by_id[tail_id] = (
                     tail_type,
-                    build_entity_name(tail_type, tail_name, tail_id, gene_symbol_map),
+                    build_base_name(tail_type, tail_name, tail_id),
                     build_clean_id(tail_id),
+                    build_gene_symbol(tail_type, tail_name, gene_symbol_map),
+                    safe_label(tail_type),
+                    build_entity_name(
+                        tail_type, tail_name, tail_id, gene_symbol_map, compound_name_map
+                    ),
                 )
 
     with nodes_csv_path.open("w", encoding="utf-8", newline="") as nodes_handle:
-        writer = csv.DictWriter(nodes_handle, fieldnames=["id", "clean_id", "type", "name"])
+        writer = csv.DictWriter(
+            nodes_handle,
+            fieldnames=["id", "clean_id", "type", "name", "mapped_name", "symbol", "type_label"],
+        )
         writer.writeheader()
-        for node_id, (node_type, node_name, clean_id) in nodes_by_id.items():
-            writer.writerow({"id": node_id, "clean_id": clean_id, "type": node_type, "name": node_name})
+        for node_id, (node_type, node_name, clean_id, symbol, type_label, mapped_name) in nodes_by_id.items():
+            writer.writerow(
+                {
+                    "id": node_id,
+                    "clean_id": clean_id,
+                    "type": node_type,
+                    "name": node_name,
+                    "mapped_name": mapped_name,
+                    "symbol": symbol,
+                    "type_label": type_label,
+                }
+            )
             stats.node_rows_written += 1
 
     with relations_csv_path.open("w", encoding="utf-8", newline="") as relation_handle:
@@ -278,6 +360,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Path to relation_glossary.tsv file.",
     )
     parser.add_argument(
+        "--drugbank-vocab-csv",
+        type=Path,
+        default=Path("drugbank vocabulary.csv"),
+        help="Path to DrugBank vocabulary CSV file.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("artifacts/graph/import_csv"),
@@ -299,9 +387,9 @@ def main() -> None:
         drkg_tsv_path=args.drkg_tsv,
         entity2src_path=args.entity2src_tsv,
         relation_glossary_path=args.relation_glossary_tsv,
+        drugbank_vocab_path=args.drugbank_vocab_csv,
         output_dir=args.output_dir,
-        resolve_gene_names=not args.no_resolve_gene_names,
-    )
+        resolve_gene_names=not args.no_resolve_gene_names)
 
     print("DRKG TSV to CSV conversion completed.")
     print(f"Edge rows read : {stats.edge_rows_read}")
@@ -314,3 +402,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    

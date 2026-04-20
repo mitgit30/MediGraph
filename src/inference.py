@@ -36,3 +36,5 @@ def predict(image_path, model, processor, device):
     print(f"{'─'*35}\n")
 
     img.show()
+    
+import 

@@ -1,6 +1,4 @@
-import csv
 from pathlib import Path
-from typing import Dict, Iterator, List
 
 from logger.logger import get_logger
 from src.graph.config import GraphConfig
@@ -9,27 +7,8 @@ from src.graph.runtime.neo4j_client import Neo4jClient
 logger = get_logger()
 
 
-def _chunk_csv_rows(file_path: Path, batch_size: int) -> Iterator[List[Dict[str, str]]]:
-    with file_path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        batch: List[Dict[str, str]] = []
-        for row in reader:
-            batch.append(row)
-            if len(batch) >= batch_size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
-
-
-def _safe_label(raw_type: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() else "_" for ch in (raw_type or "").strip())
-    cleaned = cleaned.strip("_")
-    if not cleaned:
-        return "UnknownType"
-    if cleaned[0].isdigit():
-        cleaned = f"T_{cleaned}"
-    return cleaned
+def _to_neo4j_file_url(file_path: Path) -> str:
+    return f"file:///{file_path.name}"
 
 
 def apply_schema(client: Neo4jClient, schema_path: Path) -> None:
@@ -42,6 +21,7 @@ def apply_schema(client: Neo4jClient, schema_path: Path) -> None:
     with client.driver.session(database=client.config.neo4j_database) as session:
         for statement in statements:
             session.run(statement)
+        session.run("CALL db.awaitIndexes()")
     logger.info("Schema applied successfully.")
 
 
@@ -51,36 +31,40 @@ def load_nodes(client: Neo4jClient, nodes_path: Path, batch_size: int) -> int:
         raise FileNotFoundError(f"nodes.csv not found: {nodes_path}")
 
     query = """
-    UNWIND $rows AS row
-    MERGE (n:Entity {id: row.id})
-    SET n.name = row.name,
-        n.type = row.type,
-        n.clean_id = row.clean_id
-    WITH n, row
-    CALL apoc.create.addLabels(n, [row.type_label]) YIELD node
-    RETURN count(node) AS updated
+    CALL apoc.periodic.iterate(
+      "LOAD CSV WITH HEADERS FROM $csv_url AS row RETURN row",
+      "
+        MERGE (n:Entity {id: row.id})
+        SET
+            n.name = coalesce(nullIf(row.mapped_name, ''), row.name),
+            n.raw_name = row.name,
+            n.type = row.type,
+            n.clean_id = row.clean_id,
+            n.symbol = row.symbol
+        WITH n, row
+        WITH n,
+             CASE
+                 WHEN coalesce(row.type_label, '') <> '' THEN row.type_label
+                 ELSE apoc.text.regreplace(coalesce(row.type, 'UnknownType'), '[^A-Za-z0-9]', '_')
+             END AS raw_label
+        WITH n,
+             CASE
+                 WHEN raw_label =~ '^[0-9].*' THEN 'T_' + raw_label
+                 ELSE raw_label
+             END AS type_label
+        CALL apoc.create.addLabels(n, [type_label]) YIELD node
+        RETURN count(*)
+      ",
+      {batchSize: $batch_size, parallel: true, params: {csv_url: $csv_url}}
+    )
+    YIELD total
+    RETURN total
     """
 
-    total = 0
+    csv_url = _to_neo4j_file_url(nodes_path)
     with client.driver.session(database=client.config.neo4j_database) as session:
-        for idx, batch in enumerate(_chunk_csv_rows(nodes_path, batch_size), start=1):
-            payload = []
-            for row in batch:
-                payload.append(
-                    {
-                        "id": row.get("id", "").strip(),
-                        "clean_id": row.get("clean_id", "").strip(),
-                        "name": row.get("name", "").strip(),
-                        "type": row.get("type", "").strip(),
-                        "type_label": _safe_label(row.get("type", "")),
-                    }
-                )
-
-            session.run(query, rows=payload).consume()
-            total += len(payload)
-            if idx % 20 == 0:
-                logger.info("Nodes batch %d loaded. Total nodes processed: %d", idx, total)
-
+        record = session.run(query, csv_url=csv_url, batch_size=batch_size).single()
+    total = int(record["total"]) if record and record.get("total") is not None else 0
     logger.info("Node load complete. Total nodes processed: %d", total)
     return total
 
@@ -91,37 +75,29 @@ def load_edges(client: Neo4jClient, edges_path: Path, batch_size: int) -> int:
         raise FileNotFoundError(f"edges.csv not found: {edges_path}")
 
     query = """
-    UNWIND $rows AS row
-    MATCH (h:Entity {id: row.head_id})
-    MATCH (t:Entity {id: row.tail_id})
-    MERGE (h)-[r:RELATED_TO {relation_name: row.relation_name}]->(t)
-    SET r.head_type = row.head_type,
-        r.tail_type = row.tail_type,
-        r.relation_type = row.relation_type
-    RETURN count(r) AS updated
+    CALL apoc.periodic.iterate(
+      "LOAD CSV WITH HEADERS FROM $csv_url AS row RETURN row",
+      "
+        MATCH (h:Entity {id: row.head_id})
+        MATCH (t:Entity {id: row.tail_id})
+        MERGE (h)-[r:RELATED_TO {relation_name: coalesce(row.relation_name, row.relation)}]->(t)
+        SET
+            r.relation_type = row.relation_type,
+            r.head_type = row.head_type,
+            r.tail_type = row.tail_type,
+            r.sources = row.sources
+        RETURN count(*)
+      ",
+      {batchSize: $batch_size, parallel: true, params: {csv_url: $csv_url}}
+    )
+    YIELD total
+    RETURN total
     """
 
-    total = 0
+    csv_url = _to_neo4j_file_url(edges_path)
     with client.driver.session(database=client.config.neo4j_database) as session:
-        for idx, batch in enumerate(_chunk_csv_rows(edges_path, batch_size), start=1):
-            payload = []
-            for row in batch:
-                payload.append(
-                    {
-                        "head_id": row.get("head_id", "").strip(),
-                        "tail_id": row.get("tail_id", "").strip(),
-                        "relation_name": row.get("relation", "").strip(),
-                        "relation_type": row.get("relation_type", "").strip(),
-                        "head_type": row.get("head_type", "").strip(),
-                        "tail_type": row.get("tail_type", "").strip(),
-                    }
-                )
-
-            session.run(query, rows=payload).consume()
-            total += len(payload)
-            if idx % 20 == 0:
-                logger.info("Edges batch %d loaded. Total edges processed: %d", idx, total)
-
+        record = session.run(query, csv_url=csv_url, batch_size=batch_size).single()
+    total = int(record["total"]) if record and record.get("total") is not None else 0
     logger.info("Edge load complete. Total edges processed: %d", total)
     return total
 
@@ -133,31 +109,25 @@ def load_entity_sources(client: Neo4jClient, entity_sources_path: Path, batch_si
         return 0
 
     query = """
-    UNWIND $rows AS row
-    MATCH (n:Entity {id: row.entity_id})
-    SET n.sources = row.sources,
-        n.source_systems = row.source_systems
-    RETURN count(n) AS updated
+    CALL apoc.periodic.iterate(
+      "LOAD CSV WITH HEADERS FROM $csv_url AS row RETURN row",
+      "
+        MATCH (n:Entity {id: row.entity_id})
+        SET
+            n.sources = row.sources,
+            n.source_systems = [value IN split(coalesce(row.source_systems, ''), '|') WHERE trim(value) <> '']
+        RETURN count(*)
+      ",
+      {batchSize: $batch_size, parallel: true, params: {csv_url: $csv_url}}
+    )
+    YIELD total
+    RETURN total
     """
 
-    total = 0
+    csv_url = _to_neo4j_file_url(entity_sources_path)
     with client.driver.session(database=client.config.neo4j_database) as session:
-        for batch in _chunk_csv_rows(entity_sources_path, batch_size):
-            payload = [
-                {
-                    "entity_id": row.get("entity_id", "").strip(),
-                    "sources": row.get("sources", "").strip(),
-                    "source_systems": [
-                        value.strip()
-                        for value in row.get("source_systems", "").split("|")
-                        if value.strip()
-                    ],
-                }
-                for row in batch
-            ]
-            session.run(query, rows=payload).consume()
-            total += len(payload)
-
+        record = session.run(query, csv_url=csv_url, batch_size=batch_size).single()
+    total = int(record["total"]) if record and record.get("total") is not None else 0
     logger.info("Entity source enrichment complete. Total records processed: %d", total)
     return total
 
@@ -181,7 +151,6 @@ def main() -> None:
 
     try:
         load_nodes(client, nodes_path, config.ingest_batch_size)
-        
     except Exception as exc:
         logger.exception("Node load failed.")
         client.close()

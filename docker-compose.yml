@@ -13,7 +13,7 @@ services:
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
-      - neo4j_import:/import
+      - ./artifacts/graph/import_csv:/import
       - neo4j_plugins:/plugins
       
     healthcheck:
@@ -25,6 +25,5 @@ services:
 volumes:
   neo4j_data:
   neo4j_logs:
-  neo4j_import:
   neo4j_plugins:
   
