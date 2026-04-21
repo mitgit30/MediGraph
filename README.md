@@ -1,4 +1,4 @@
-## MediGraph
+﻿## MediGraph
 
 MediGraph is a prescription understanding system with:
 - OCR pipeline for doctor handwriting extraction (TrOCR fine-tuning).
@@ -6,26 +6,19 @@ MediGraph is a prescription understanding system with:
 
 ## Current Project State
 
-- OCR training/inference pipeline is available.
-- DRKG preprocessing is completed (`tsv -> csv`).
-- Neo4j ingestion is completed (graph loaded and queryable).
-- Phase 2 retrieval modules are implemented:
-  - entity linking
-  - local graph retrieval
-  - context building
-  - basic pipeline orchestration
-- Medicine normalization bridge is added (brand -> generic expansion from dataset labels).
-### Overall Project State
+The prototype now provides a **fully functional end‑to‑end pipeline**:
 
-The repository now provides a **complete end-to-end prototype** that can:
-
-1. **Ingest** the DRKG biomedical knowledge graph into Neo4j (schema applied, CSV import automated).
-2. **Link** free-text prescription statements to graph entities using exact, prefix and fuzzy matching, with a medicine-specific alias mapper.
-3. **Retrieve** a localized sub-graph (1-2 hops) around the matched entities, assemble evidence paths, and surface them as LLM-ready context.
-4. **Generate** a concise natural-language summary via the configured LLM adapter (e.g., Ollama, OpenAI).
-5. **Expose** a simple CLI entry point (`main.py`) for quick sanity checks and a clear path to wrap the flow in a FastAPI/Streamlit UI.
-
-All components are wired together through thin adapters (`Neo4jClient`, `LocalLLMAdapter`) and respect the layered architecture described in the Technical Architecture section. Tests cover the Neo4j client, medicine mapper, and graph retrieval pipeline, confirming that each stage returns non-empty results when proper data is present.
+* **OCR stage** – training and inference code are operational and can process handwritten prescription images.
+* **DRKG preprocessing** – TSV files are converted to CSV (`tsv → csv`) and are ready for bulk import.
+* **Neo4j ingestion** – the graph schema is applied, CSVs are loaded, and the database is queryable via the provided client wrapper.
+* **Retrieval layer (Phase 2)** – all core modules are in place:
+  * **Entity linking** with exact, prefix, and fuzzy matching, plus the existing `MedicineMapper` for brand‑to‑generic expansion.
+  * **Graph retriever** that fetches 1‑2‑hop neighborhoods around matched entities.
+  * **Context builder** that formats retrieved evidence for downstream LLM consumption.
+  * **Pipeline orchestration** that ties the above steps together and returns a structured result.
+* **Alias/medicine mapper** – expands drug brand names to their generic identifiers, enabling more robust matching.
+* **Test coverage** – the test suite validates the Neo4j client, medicine mapper, and retrieval pipeline; all tests pass when a Neo4j instance is available.
+* **Configuration‑driven** – runtime settings (Neo4j credentials, LLM provider, batch sizes, etc.) are supplied via a `.env` file; no secrets are hard‑coded.
 
 ## Technical Architecture (Current)
 
@@ -138,4 +131,3 @@ Expected behavior:
 - Add retrieval ranking and confidence calibration.
 - Connect retrieval context to final LLM report generation.
 - Integrate full flow in Streamlit UI.
-
